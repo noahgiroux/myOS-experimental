@@ -1,15 +1,14 @@
 ---
 # yaml-language-server: $schema=https://schema.blue-build.org/recipe-v1.json
-# image will be published to ghcr.io/<user>/<name>
-name: fedora-gnome-wl
-# description will be included in the image's metadata
-description: This is my personal OS image.
 
-# the base image to build on top of (FROM) and the version tag to use
+name: fedora-gnome-wl
+description: myOS Fedora GNOME with Broadcom wl driver
+
 base-image: ghcr.io/myos-dev/fedora-gnome
 image-version: latest
 
 modules:
   - type: akmods
+    base: main
     install:
       - wl
