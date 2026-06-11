@@ -8,7 +8,60 @@ base-image: ghcr.io/myos-dev/fedora-gnome
 image-version: latest
 
 modules:
-  - type: akmods
-    base: main
+  - type: dnf
+    repos:
+      nonfree: rpmfusion
+
     install:
-      - wl
+      install-weak-deps: true
+      packages:
+        - akmods
+        - akmod-wl
+        - broadcom-wl
+        - kernel-devel-matched
+        - kernel-headers
+        - gcc
+        - make
+        - elfutils-libelf-devel
+        - openssl
+        - openssl-devel
+        - kmod
+        - pciutils
+
+  - type: script
+    snippets:
+      - |
+        bash -euxo pipefail <<'EOF'
+
+        # Make sure the in-kernel Broadcom drivers do not bind before wl.
+        install -Dm0644 /dev/stdin /usr/lib/modprobe.d/99-broadcom-wl-local.conf <<'CONF'
+        blacklist b43
+        blacklist b43legacy
+        blacklist ssb
+        blacklist bcma
+        blacklist brcmsmac
+        CONF
+
+        dnf_cmd="$(command -v dnf5 || command -v dnf)"
+
+        # Use the kernel that is actually present in the image.
+        kver="$(basename "$(find /usr/lib/modules -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)")"
+        test -n "$kver"
+
+        echo "Building wl kmod for kernel: $kver"
+
+        # Build RPM Fusion's wl akmod for the image kernel.
+        akmods --force --kernels "$kver" || akmods --force --kernel "$kver"
+
+        # Install the generated kmod RPM into the image.
+        kmod_rpm="$(find /var/cache/akmods/wl -type f -name "kmod-wl-${kver}*.rpm" | sort -V | tail -n 1)"
+        test -n "$kmod_rpm"
+
+        "$dnf_cmd" -y install "$kmod_rpm"
+
+        depmod -a "$kver"
+
+        # Fail the build if wl still is not visible for the image kernel.
+        modinfo -k "$kver" wl
+
+        EOF
