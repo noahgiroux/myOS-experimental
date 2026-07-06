@@ -2,9 +2,9 @@
 # yaml-language-server: $schema=https://schema.blue-build.org/recipe-v1.json
 
 name: fedora-gnome-wl
-description: myOS Fedora GNOME with Broadcom wl driver
+description: Pelagian Current Fedora GNOME with Broadcom wl driver
 
-base-image: ghcr.io/myos-dev/fedora-gnome
+base-image: ghcr.io/pelagians/fedora-gnome
 image-version: latest
 
 modules:
