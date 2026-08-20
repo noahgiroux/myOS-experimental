@@ -1,43 +1,83 @@
-# myOS-experimental &nbsp; [![bluebuild build badge](https://github.com/noahgiroux/myos-experimental/actions/workflows/build.yml/badge.svg)](https://github.com/noahgiroux/myos-experimental/actions/workflows/build.yml)
+# Current Personal
 
-See the [BlueBuild docs](https://blue-build.org/how-to/setup/) for quick setup instructions for setting up your own repository based on this template.
+Personal Current BlueBuild images for niche hardware, derived from Current’s
+published Fedora GNOME image. The normal Current image is deliberately
+unchanged. This repository publishes independent hardware images:
 
-After setup, it is recommended you update this README to describe your custom image.
+- `ghcr.io/noahgiroux/fedora-gnome-wl:latest` — the Broadcom `wl` image,
+  using only `broadcom-wl.yml`.
+- `ghcr.io/noahgiroux/fedora-gnome-ux8406:latest` — a UX8406-specific layer
+  on `ghcr.io/pelagians/fedora-gnome:latest`. It does not inherit or share
+  hardware-specific code with the WL image.
+
+## UX8406 image
+
+The UX8406 layer adds only `gnome-monitor-config`, `iio-sensor-proxy`,
+`inotify-tools`, and `libwacom-utils`. It recognizes the UX8406MA profile:
+
+- DMI: `ASUSTeK COMPUTER INC.` / `UX8406MA`
+- detachable keyboard: `0b05:1b2c`
+- upper touchscreen/tablet: `04f3:425b`
+- lower touchscreen/tablet: `04f3:425a`
+- preferred connectors: `eDP-1` and `eDP-2`
+- preferred mode: `2880x1800@120`
+- panel baseline: `SDC`, `0x419d`, `0x00000000`
+
+After login, the user service verifies GNOME Wayland, discovers Mutter’s
+connected monitors and exact mode IDs, maps both touch and tablet devices,
+selects the attached/detached layout, and watches udev keyboard events and
+`monitor-sensor` rotation changes. Automatic changes stop when an external
+monitor is present. Use the helper for inspection or manual control:
+
+```bash
+/usr/libexec/current-zenbook-duo check-hardware
+/usr/libexec/current-zenbook-duo status
+/usr/libexec/current-zenbook-duo top
+/usr/libexec/current-zenbook-duo bottom
+/usr/libexec/current-zenbook-duo both
+/usr/libexec/current-zenbook-duo toggle
+/usr/libexec/current-zenbook-duo setup-inputs
+```
+
+Display and battery defaults are in `/etc/current/zenbook-duo.conf`:
+
+```ini
+[Display]
+TopConnector=
+BottomConnector=
+Mode=
+Scale=auto
+
+[Battery]
+ChargeLimit=80
+```
+
+The root services synchronize the lower OLED by normalized brightness ratio
+and apply the charge threshold only when the kernel exposes the standard
+`BAT0/charge_control_end_threshold` interface. The GNOME service has no sudo
+or privileged command path.
 
 ## Installation
 
-> [!WARNING]  
-> [This is an experimental feature](https://www.fedoraproject.org/wiki/Changes/OstreeNativeContainerStable), try at your own discretion.
-
-To rebase an existing atomic Fedora installation to the latest build:
-
-- First rebase to the unsigned image, to get the proper signing keys and policies installed:
-  ```
-  rpm-ostree rebase ostree-unverified-registry:ghcr.io/noahgiroux/myos-experimental:latest
-  ```
-- Reboot to complete the rebase:
-  ```
-  systemctl reboot
-  ```
-- Then rebase to the signed image, like so:
-  ```
-  rpm-ostree rebase ostree-image-signed:docker://ghcr.io/noahgiroux/myos-experimental:latest
-  ```
-- Reboot again to complete the installation
-  ```
-  systemctl reboot
-  ```
-
-The `latest` tag will automatically point to the latest build. That build will still always use the Fedora version specified in `recipe.yml`, so you won't get accidentally updated to the next major version.
-
-## ISO
-
-If build on Fedora Atomic, you can generate an offline ISO with the instructions available [here](https://blue-build.org/how-to/generate-iso/#_top). These ISOs cannot unfortunately be distributed on GitHub for free due to large sizes, so for public projects something else has to be used for hosting.
-
-## Verification
-
-These images are signed with [Sigstore](https://www.sigstore.dev/)'s [cosign](https://github.com/sigstore/cosign). You can verify the signature by downloading the `cosign.pub` file from this repo and running the following command:
+For an existing bootc installation:
 
 ```bash
-cosign verify --key cosign.pub ghcr.io/noahgiroux/myos-experimental
+sudo bootc switch ghcr.io/noahgiroux/fedora-gnome-ux8406:latest
+sudo systemctl reboot
 ```
+
+These hardware images are experimental. Before promoting the UX8406 image
+beyond testing, verify display connector/mode/scale discovery,
+external-monitor protection, USB and Bluetooth
+keyboard attach/detach, touch/pen mapping, rotation axes, both backlight names,
+suspend/resume synchronization, battery threshold support, speakers,
+microphones and headset output, IPU6 webcam, and Intel `ivpu` NPU behavior.
+
+Intentionally deferred pending physical UX8406 testing: keyboard-backlight USB
+detachment, lower-touch inhibition, Intel PSR or other kernel arguments, DKMS
+or custom kernels, patched Mutter/libwacom, and out-of-tree audio/camera/NPU
+workarounds. In particular, the Fedora kernel’s `1043:1c43` quirk must be
+tested on the built image for the analog headset microphone before any audio
+workaround is considered.
+
+Run local checks with `./scripts/validate-ux8406.sh`.

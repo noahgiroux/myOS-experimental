@@ -1,0 +1,13 @@
+[Unit]
+Description=Current ASUS Zenbook Duo UX8406 GNOME session integration
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/current-zenbook-duo session
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=graphical-session.target

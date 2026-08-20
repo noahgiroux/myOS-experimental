@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""Current UX8406 session/display controller.
+
+All automatic operations are conservative: unsupported models and external
+monitors are left alone, and Mutter changes are serialized and retried.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import selectors
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from current_zenbook_duo_lib import (  # noqa: E402
+    CONFIG_PATH, PROFILE_DIR, effective_connectors, has_external_monitor,
+    hardware_status, keyboard_attached, layout_plan, load_profile, mutter_state,
+    read_config, run_command,
+)
+
+
+def profile_or_exit():
+    ok, message = hardware_status(PROFILE_DIR)
+    if not ok:
+        print(message, file=sys.stderr)
+        raise SystemExit(0)
+    return load_profile(profile_dir=PROFILE_DIR)
+
+
+def apply_layout(profile, orientation="normal", attached=False, force=False, only=None):
+    config = read_config(CONFIG_PATH)
+    state = mutter_state()
+    top, bottom = effective_connectors(profile, config)
+    if has_external_monitor(state, (top, bottom)) and not force:
+        print("external monitor active; automatic layout skipped", file=sys.stderr)
+        return False
+    plan = layout_plan(state, profile, orientation, attached, config)
+    if only in ("top", "bottom"):
+        plan = [item for item in plan if item["connector"] == (top if only == "top" else bottom)]
+    if not plan:
+        print("internal UX8406 panels are not both available", file=sys.stderr)
+        return False
+    # gnome-monitor-config is the only display mutator used here. Each logical
+    # monitor is supplied with an exact Mutter mode id discovered above.
+    command = ["gnome-monitor-config", "set"]
+    for item in plan:
+        if not item["mode"]:
+            continue
+        command.extend(["-L", f'{item["x"]},{item["y"]},{item["scale"]:g}',
+                        "-M", f'{item["connector"]}:{item["mode"]}',
+                        "-t", item["transform"]])
+    for attempt in range(4):
+        try:
+            run_command(command)
+            return True
+        except (FileNotFoundError, subprocess.CalledProcessError) as error:
+            if attempt == 3:
+                print(f"display operation failed: {error}", file=sys.stderr)
+                return False
+            time.sleep(0.25 * (2 ** attempt))
+    return False
+
+
+def setup_inputs(profile):
+    state = mutter_state()
+    config = read_config(CONFIG_PATH)
+    top, bottom = effective_connectors(profile, config)
+    by_connector = {m["connector"]: m for m in state["monitors"]}
+    mappings = ((profile.upper_input, top), (profile.lower_input, bottom))
+    for device, connector in mappings:
+        monitor = by_connector.get(connector)
+        if monitor is None:
+            continue
+        values = [monitor["vendor"], monitor["product"], monitor["serial"], connector]
+        # GNOME's connector-disambiguated mapping is a four-string dconf tuple.
+        value = "[" + ", ".join("'" + x.replace("'", "") + "'" for x in values) + "]"
+        for kind in ("touchscreens", "tablets"):
+            path = f"/org/gnome/desktop/peripherals/{kind}/{device}/output"
+            try:
+                subprocess.run(["dconf", "write", path, value], check=True)
+            except (FileNotFoundError, subprocess.CalledProcessError) as error:
+                print(f"unable to map {kind} {device}: {error}", file=sys.stderr)
+
+
+def orientation_from_sensor(line: str) -> str | None:
+    line = line.lower()
+    for name in ("bottom-up", "left-up", "right-up", "normal"):
+        if name in line:
+            return name
+    return None
+
+
+def watch_displays(profile):
+    # udev is event-driven; sysfs is consulted only to confirm the new state.
+    process = subprocess.Popen(["udevadm", "monitor", "--udev", "--subsystem-match=usb", "--property"],
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    try:
+        for line in process.stdout or ():
+            if line.startswith("ACTION=") or line.startswith("DEVPATH="):
+                if keyboard_attached(profile):
+                    apply_layout(profile, attached=False)
+                else:
+                    apply_layout(profile, attached=True)
+    finally:
+        process.terminate()
+
+
+def watch_rotation(profile):
+    process = subprocess.Popen(["monitor-sensor", "--accel"], stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True)
+    last = None
+    try:
+        for line in process.stdout or ():
+            orientation = orientation_from_sensor(line)
+            if orientation and orientation != last:
+                last = orientation
+                apply_layout(profile, orientation, attached=not keyboard_attached(profile))
+    finally:
+        process.terminate()
+
+
+def session(profile):
+    if os.environ.get("XDG_SESSION_TYPE") not in (None, "wayland"):
+        print("UX8406 session helper requires GNOME Wayland", file=sys.stderr)
+        return 0
+    for _ in range(12):
+        try:
+            mutter_state()
+            break
+        except (FileNotFoundError, subprocess.CalledProcessError, ValueError):
+            time.sleep(1)
+    else:
+        return 0
+    setup_inputs(profile)
+    apply_layout(profile, attached=keyboard_attached(profile))
+    selector = selectors.DefaultSelector()
+    processes = []
+    for command in (("watch-displays",), ("watch-rotation",)):
+        process = subprocess.Popen([sys.argv[0], *command], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        processes.append(process)
+    try:
+        while all(process.poll() is None for process in processes):
+            time.sleep(5)
+    finally:
+        for process in processes:
+            process.terminate()
+        selector.close()
+    return 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--force", action="store_true", help="allow manual changes with an external monitor")
+    parser.add_argument("command", choices=("check-hardware", "status", "top", "bottom", "both",
+                                              "toggle", "setup-inputs", "watch-displays", "watch-rotation", "session"))
+    args = parser.parse_args(argv)
+    if args.command == "check-hardware":
+        ok, message = hardware_status(PROFILE_DIR)
+        print(message)
+        return 0 if ok else 1
+    profile = profile_or_exit()
+    if args.command == "status":
+        try:
+            state = mutter_state()
+            config = read_config(CONFIG_PATH)
+            top, bottom = effective_connectors(profile, config)
+            print(f"model={profile.product} keyboard={'attached' if keyboard_attached(profile) else 'detached'}")
+            print(f"top={top} bottom={bottom} external={has_external_monitor(state, (top, bottom))}")
+            for monitor in state["monitors"]:
+                modes = ",".join(mode["id"] for mode in monitor["modes"])
+                print(f"monitor={monitor['connector']} edid={monitor['vendor']}/{monitor['product']}/{monitor['serial']} modes={modes}")
+            for logical in state["logical_monitors"]:
+                outputs = ",".join(output[0] for output in logical["outputs"])
+                print(f"logical={outputs} position={logical['x']},{logical['y']} scale={logical['scale']:g} transform={logical['transform']}")
+        except (FileNotFoundError, subprocess.CalledProcessError, ValueError) as error:
+            print(f"Mutter unavailable: {error}", file=sys.stderr)
+        return 0
+    if args.command == "setup-inputs":
+        setup_inputs(profile)
+        return 0
+    if args.command == "top":
+        return 0 if apply_layout(profile, attached=True, force=args.force, only="top") else 1
+    if args.command == "bottom":
+        return 0 if apply_layout(profile, attached=False, force=args.force, only="bottom") else 1
+    if args.command == "both":
+        return 0 if apply_layout(profile, force=args.force) else 1
+    if args.command == "toggle":
+        return 0 if apply_layout(profile, attached=keyboard_attached(profile), force=args.force) else 1
+    if args.command == "watch-displays":
+        watch_displays(profile); return 0
+    if args.command == "watch-rotation":
+        watch_rotation(profile); return 0
+    return session(profile)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

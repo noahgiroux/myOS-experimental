@@ -26,8 +26,8 @@ jobs:
       fail-fast: false # stop GH from cancelling all matrix builds if one fails
       matrix:
         recipe:
-          # !! Add your recipes here
           - recipe.yml
+          - images/workstation/gnome/fedora/ux8406.yml
     steps:
       # the build is fully handled by the reusable github action
       - name: Build Custom Image
@@ -40,3 +40,13 @@ jobs:
 
           # enabled by default, disable if your image is small and you want faster builds
           maximize_build_space: true
+
+  validate:
+    name: Validate recipes and UX8406 fixtures
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate UX8406 implementation
+        run: ./scripts/validate-ux8406.sh

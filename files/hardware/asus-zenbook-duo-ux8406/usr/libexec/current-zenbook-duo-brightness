@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Synchronize UX8406 OLED brightness using normalized brightness ratios."""
+from __future__ import annotations
+import os
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from current_zenbook_duo_lib import (PROFILE_DIR, brightness_value, find_backlight,
+                                     hardware_status, load_profile)
+
+
+def read_int(path: Path) -> int:
+    return int(path.read_text().strip())
+
+
+def sync(upper: Path, lower: Path) -> bool:
+    try:
+        value = brightness_value(read_int(upper / "brightness"), read_int(upper / "max_brightness"),
+                                 read_int(lower / "max_brightness"))
+        (lower / "brightness").write_text(f"{value}\n")
+        return True
+    except (OSError, ValueError, ZeroDivisionError):
+        return False
+
+
+def main() -> int:
+    ok, _ = hardware_status(PROFILE_DIR)
+    if not ok:
+        return 0
+    profile = load_profile(profile_dir=PROFILE_DIR)
+    if profile is None:
+        return 0
+    root = Path(os.environ.get("ZENBOOK_DUO_BACKLIGHT_ROOT", "/sys/class/backlight"))
+    upper = find_backlight(profile.upper_backlight_patterns, root)
+    lower = find_backlight(profile.lower_backlight_patterns, root)
+    if upper is None or lower is None:
+        return 0
+    sync(upper, lower)
+    if len(sys.argv) > 1 and sys.argv[1] == "--once":
+        return 0
+    try:
+        # inotifywait is intentionally used as an event source, never as a
+        # privileged command runner. Missing devices simply end the service.
+        process = __import__("subprocess").Popen(["inotifywait", "-mq", "-e", "modify", str(upper / "brightness")],
+                                                 stdout=__import__("subprocess").PIPE, text=True)
+        for _ in process.stdout or ():
+            if not sync(upper, lower):
+                break
+    except (FileNotFoundError, OSError):
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

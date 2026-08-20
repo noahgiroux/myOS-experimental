@@ -1,0 +1,13 @@
+[Unit]
+Description=Synchronize ASUS Zenbook Duo UX8406 OLED brightness
+After=systemd-udev-settle.service
+ConditionPathExists=/sys/class/backlight
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/current-zenbook-duo-brightness
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

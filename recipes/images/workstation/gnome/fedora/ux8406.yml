@@ -1,0 +1,10 @@
+# yaml-language-server: $schema=https://schema.blue-build.org/recipe-v1.json
+
+name: fedora-gnome-ux8406
+description: Current Personal Fedora GNOME for the ASUS Zenbook Duo UX8406 family
+
+base-image: ghcr.io/pelagians/fedora-gnome
+image-version: latest
+
+modules:
+  - from-file: layers/hardware/asus-zenbook-duo-ux8406.yml

@@ -1,0 +1,24 @@
+---
+modules:
+  - type: dnf
+    install:
+      install-weak-deps: false
+      packages:
+        - gnome-monitor-config
+        - iio-sensor-proxy
+        - inotify-tools
+        - libwacom-utils
+
+  - type: files
+    files:
+      - source: hardware/asus-zenbook-duo-ux8406
+        destination: /
+
+  - type: systemd
+    system:
+      enabled:
+        - current-zenbook-duo-brightness.service
+        - current-zenbook-duo-charge-limit.service
+    user:
+      enabled:
+        - current-zenbook-duo-session.service

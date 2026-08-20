@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+"""Apply the configured kernel ASUS battery charge threshold safely."""
+from __future__ import annotations
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from current_zenbook_duo_lib import CONFIG_PATH, validate_charge_limit
+import configparser
+
+
+def main() -> int:
+    control = Path("/sys/class/power_supply/BAT0/charge_control_end_threshold")
+    if not control.exists():
+        return 0
+    parser = configparser.ConfigParser()
+    parser.read(CONFIG_PATH)
+    raw = parser.get("Battery", "ChargeLimit", fallback="80")
+    try:
+        value = validate_charge_limit(raw)
+    except (TypeError, ValueError):
+        print("invalid UX8406 ChargeLimit; expected an integer from 1 to 100", file=sys.stderr)
+        return 2
+    try:
+        control.write_text(f"{value}\n")
+    except OSError as error:
+        print(f"unable to apply charge limit: {error}", file=sys.stderr)
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
