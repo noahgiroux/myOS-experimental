@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch for ASUS Zenbook Duo UX8406 resume signals
+PartOf=graphical-session.target
+
+[Path]
+PathChanged=/run/current-zenbook-duo/resume
+Unit=current-zenbook-duo-resume.service
+
+[Install]
+WantedBy=default.target

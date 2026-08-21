@@ -9,7 +9,8 @@ python3 -m py_compile \
   files/hardware/asus-zenbook-duo-ux8406/usr/libexec/current_zenbook_duo_lib.py \
   files/hardware/asus-zenbook-duo-ux8406/usr/libexec/current-zenbook-duo \
   files/hardware/asus-zenbook-duo-ux8406/usr/libexec/current-zenbook-duo-brightness \
-  files/hardware/asus-zenbook-duo-ux8406/usr/libexec/current-zenbook-duo-charge-limit
+  files/hardware/asus-zenbook-duo-ux8406/usr/libexec/current-zenbook-duo-charge-limit \
+  files/hardware/asus-zenbook-duo-ux8406/usr/lib/systemd/system-sleep/current-zenbook-duo-resume
 
 python3 - <<'PY'
 from pathlib import Path
@@ -18,14 +19,21 @@ import re
 ux = Path('recipes/layers/hardware/asus-zenbook-duo-ux8406.yml').read_text()
 package_block = ux.split('packages:', 1)[1].split('  - type:', 1)[0]
 packages = re.findall(r'^        - (.+)$', package_block, re.M)
-assert packages == ['gnome-monitor-config', 'iio-sensor-proxy', 'inotify-tools', 'libwacom-utils'], packages
+assert packages == ['iio-sensor-proxy', 'inotify-tools', 'libwacom-utils'], packages
 for prohibited in ('asusctl', 'supergfxctl', 'power-profiles-daemon', 'akmods', 'dkms', 'kernel-devel', 'i915.enable_psr=0', 'python3-pyusb'):
     assert prohibited.lower() not in ux.lower(), prohibited
 recipe = Path('recipes/images/workstation/gnome/fedora/ux8406.yml').read_text()
 assert 'ghcr.io/pelagians/fedora-gnome' in recipe
 assert 'broadcom-wl' not in recipe and 'broadcom-wl' not in ux
+assert 'gnome-monitor-config' not in ux
 assert 'from-file: layers/hardware/broadcom-wl.yml' in Path('recipes/recipe.yml').read_text()
 assert 'asus-zenbook-duo-ux8406.yml' not in Path('recipes/recipe.yml').read_text()
+workflow = Path('.github/workflows/build.yml').read_text()
+assert '- recipe.yml' in workflow and '- images/workstation/gnome/fedora/ux8406.yml' in workflow
+user_unit = Path('files/hardware/asus-zenbook-duo-ux8406/usr/lib/systemd/user/current-zenbook-duo-session.service').read_text()
+assert 'ExecStart=/usr/libexec/current-zenbook-duo session' in user_unit
+resume_unit = Path('files/hardware/asus-zenbook-duo-ux8406/usr/lib/systemd/user/current-zenbook-duo-resume.service').read_text()
+assert 'ExecStart=/usr/libexec/current-zenbook-duo resume' in resume_unit
 PY
 
 if command -v bluebuild >/dev/null 2>&1; then
@@ -33,7 +41,7 @@ if command -v bluebuild >/dev/null 2>&1; then
   bluebuild validate recipes/images/workstation/gnome/fedora/ux8406.yml
   bluebuild generate -d recipes/images/workstation/gnome/fedora/ux8406.yml >/dev/null
 else
-  echo 'bluebuild not installed; skipped recipe validation/generation'
+  echo 'bluebuild CLI not installed; the independent BlueBuild image-build matrix is the authoritative recipe validation in CI'
 fi
 
 if command -v systemd-analyze >/dev/null 2>&1; then
@@ -47,6 +55,20 @@ if command -v systemd-analyze >/dev/null 2>&1; then
   systemd-analyze verify --root="$unit_root" \
     "$unit_root/usr/lib/systemd/system/current-zenbook-duo-brightness.service" \
     "$unit_root/usr/lib/systemd/system/current-zenbook-duo-charge-limit.service"
+  user_verify="$unit_root/user-verify"
+  mkdir -p "$user_verify"
+  cp files/hardware/asus-zenbook-duo-ux8406/usr/lib/systemd/user/* "$user_verify/"
+  # Verify the actual user-unit syntax against this host's user manager. The
+  # image-local absolute helper path is replaced only for the verifier's local
+  # executable-existence check; a static assertion above retains the real path.
+  sed -i \
+    -e 's#/usr/libexec/current-zenbook-duo session#/usr/bin/true#' \
+    -e 's#/usr/libexec/current-zenbook-duo resume#/usr/bin/true#' \
+    "$user_verify/current-zenbook-duo-session.service" "$user_verify/current-zenbook-duo-resume.service"
+  systemd-analyze --user verify \
+    "$user_verify/current-zenbook-duo-session.service" \
+    "$user_verify/current-zenbook-duo-resume.service" \
+    "$user_verify/current-zenbook-duo-resume.path"
 fi
 
 if command -v shellcheck >/dev/null 2>&1; then

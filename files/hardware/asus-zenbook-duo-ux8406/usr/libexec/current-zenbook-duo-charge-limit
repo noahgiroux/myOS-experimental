@@ -4,11 +4,14 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from current_zenbook_duo_lib import CONFIG_PATH, validate_charge_limit
+from current_zenbook_duo_lib import CONFIG_PATH, PROFILE_DIR, hardware_status, validate_charge_limit
 import configparser
 
 
 def main() -> int:
+    supported, _ = hardware_status(PROFILE_DIR)
+    if not supported:
+        return 0
     control = Path("/sys/class/power_supply/BAT0/charge_control_end_threshold")
     if not control.exists():
         return 0

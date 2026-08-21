@@ -2,6 +2,7 @@
 """Synchronize UX8406 OLED brightness using normalized brightness ratios."""
 from __future__ import annotations
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -25,6 +26,16 @@ def sync(upper: Path, lower: Path) -> bool:
         return False
 
 
+def wait_for_backlights(profile, root: Path, attempts: int = 30) -> tuple[Path | None, Path | None]:
+    for _ in range(attempts):
+        upper = find_backlight(profile.upper_backlight_patterns, root)
+        lower = find_backlight(profile.lower_backlight_patterns, root)
+        if upper is not None and lower is not None:
+            return upper, lower
+        time.sleep(1)
+    return None, None
+
+
 def main() -> int:
     ok, _ = hardware_status(PROFILE_DIR)
     if not ok:
@@ -33,18 +44,20 @@ def main() -> int:
     if profile is None:
         return 0
     root = Path(os.environ.get("ZENBOOK_DUO_BACKLIGHT_ROOT", "/sys/class/backlight"))
-    upper = find_backlight(profile.upper_backlight_patterns, root)
-    lower = find_backlight(profile.lower_backlight_patterns, root)
+    once = len(sys.argv) > 1 and sys.argv[1] == "--once"
+    upper, lower = wait_for_backlights(profile, root, attempts=5 if once else 30)
     if upper is None or lower is None:
-        return 0
+        # On supported hardware this is normally a resume/device-init race.
+        # Return failure so systemd's bounded restart policy retries later.
+        return 0 if once else 1
     sync(upper, lower)
-    if len(sys.argv) > 1 and sys.argv[1] == "--once":
+    if once:
         return 0
     try:
         # inotifywait is intentionally used as an event source, never as a
         # privileged command runner. Missing devices simply end the service.
-        process = __import__("subprocess").Popen(["inotifywait", "-mq", "-e", "modify", str(upper / "brightness")],
-                                                 stdout=__import__("subprocess").PIPE, text=True)
+        process = subprocess.Popen(["inotifywait", "-mq", "-e", "modify", str(upper / "brightness")],
+                                   stdout=subprocess.PIPE, text=True)
         for _ in process.stdout or ():
             if not sync(upper, lower):
                 break

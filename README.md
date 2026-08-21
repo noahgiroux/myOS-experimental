@@ -1,33 +1,42 @@
 # Current Personal
 
-Personal Current BlueBuild images for niche hardware, derived from Current’s
-published Fedora GNOME image. The normal Current image is deliberately
-unchanged. This repository publishes independent hardware images:
+Personal Current images for niche hardware. Both images inherit the normal
+Current Fedora GNOME base, `ghcr.io/pelagians/fedora-gnome:latest`, and retain
+their own narrow hardware layer:
 
-- `ghcr.io/noahgiroux/fedora-gnome-wl:latest` — the Broadcom `wl` image,
-  using only `broadcom-wl.yml`.
-- `ghcr.io/noahgiroux/fedora-gnome-ux8406:latest` — a UX8406-specific layer
-  on `ghcr.io/pelagians/fedora-gnome:latest`. It does not inherit or share
-  hardware-specific code with the WL image.
+- `ghcr.io/noahgiroux/fedora-gnome-wl:latest` — Broadcom `wl` only.
+- `ghcr.io/noahgiroux/fedora-gnome-ux8406:latest` — ASUS Zenbook Duo UX8406
+  support only. It neither imports nor changes the WL layer.
 
-## UX8406 image
+## UX8406
 
-The UX8406 layer adds only `gnome-monitor-config`, `iio-sensor-proxy`,
-`inotify-tools`, and `libwacom-utils`. It recognizes the UX8406MA profile:
+The supported profile is the 2024 UX8406MA. Detection requires
+`ASUSTeK COMPUTER INC.` and prefers DMI `board_name=UX8406MA`; a longer
+`product_name` containing `UX8406MA` is accepted as a fallback. UX8406CA is
+recognized as family hardware but safely does nothing until a CA profile is
+added.
 
-- DMI: `ASUSTeK COMPUTER INC.` / `UX8406MA`
-- detachable keyboard: `0b05:1b2c`
-- upper touchscreen/tablet: `04f3:425b`
-- lower touchscreen/tablet: `04f3:425a`
-- preferred connectors: `eDP-1` and `eDP-2`
-- preferred mode: `2880x1800@120`
-- panel baseline: `SDC`, `0x419d`, `0x00000000`
+The image uses Fedora 44 Mutter's built-in `gdctl` for transient GNOME Wayland
+layouts. It does not install another Mutter or a separate display-config tool.
+With the detachable keyboard connected over USB, automatic policy selects the
+upper display only. When detached, it selects both displays in a stacked
+layout. Rotation from `monitor-sensor` supports normal, bottom-up, left-up,
+and right-up layouts. The service uses only relative `gdctl` placement, so it
+does not hard-code pixel offsets or persist automatic changes to GNOME's saved
+monitor configuration.
 
-After login, the user service verifies GNOME Wayland, discovers Mutter’s
-connected monitors and exact mode IDs, maps both touch and tablet devices,
-selects the attached/detached layout, and watches udev keyboard events and
-`monitor-sensor` rotation changes. Automatic changes stop when an external
-monitor is present. Use the helper for inspection or manual control:
+Touchscreen and tablet mappings are applied for `04f3:425b` (upper) and
+`04f3:425a` (lower), and the supplied libinput quirk enables detachable
+keyboard/touchpad palm rejection. Root-only support is limited to normalized
+OLED brightness synchronization and the standard battery charge threshold,
+which defaults to 80%. A system-sleep hook re-syncs brightness after resume;
+the hook also signals a global user `.path` unit, whose GNOME-side service
+re-evaluates keyboard state, layout, touch mapping, and orientation after
+resume.
+
+Automatic dock, undock, rotation, and resume changes leave GNOME alone whenever
+another DRM display is connected. Manual layouts require `--force` to override
+that protection:
 
 ```bash
 /usr/libexec/current-zenbook-duo check-hardware
@@ -36,48 +45,45 @@ monitor is present. Use the helper for inspection or manual control:
 /usr/libexec/current-zenbook-duo bottom
 /usr/libexec/current-zenbook-duo both
 /usr/libexec/current-zenbook-duo toggle
-/usr/libexec/current-zenbook-duo setup-inputs
+/usr/libexec/current-zenbook-duo --force both
 ```
 
-Display and battery defaults are in `/etc/current/zenbook-duo.conf`:
-
-```ini
-[Display]
-TopConnector=
-BottomConnector=
-Mode=
-Scale=auto
-
-[Battery]
-ChargeLimit=80
-```
-
-The root services synchronize the lower OLED by normalized brightness ratio
-and apply the charge threshold only when the kernel exposes the standard
-`BAT0/charge_control_end_threshold` interface. The GNOME service has no sudo
-or privileged command path.
+Display connector, optional mode, and scale overrides live in
+`/etc/current/zenbook-duo.conf`. `Scale=auto` uses the UX8406MA profile default
+of `1.66667`, suitable for the common 3K panel; administrators can set another
+valid GNOME scale explicitly.
 
 ## Installation
-
-For an existing bootc installation:
 
 ```bash
 sudo bootc switch ghcr.io/noahgiroux/fedora-gnome-ux8406:latest
 sudo systemctl reboot
 ```
 
-These hardware images are experimental. Before promoting the UX8406 image
-beyond testing, verify display connector/mode/scale discovery,
-external-monitor protection, USB and Bluetooth
-keyboard attach/detach, touch/pen mapping, rotation axes, both backlight names,
-suspend/resume synchronization, battery threshold support, speakers,
-microphones and headset output, IPU6 webcam, and Intel `ivpu` NPU behavior.
+## Hardware-test gates
 
-Intentionally deferred pending physical UX8406 testing: keyboard-backlight USB
-detachment, lower-touch inhibition, Intel PSR or other kernel arguments, DKMS
-or custom kernels, patched Mutter/libwacom, and out-of-tree audio/camera/NPU
-workarounds. In particular, the Fedora kernel’s `1043:1c43` quirk must be
-tested on the built image for the analog headset microphone before any audio
-workaround is considered.
+Keyboard backlight control and hotkey remapping remain phase-two work. This
+image intentionally does not add `asusctl`, `supergfxctl`, passwordless sudo,
+DKMS, custom kernels, patched Mutter/libwacom, or out-of-tree audio/camera/NPU
+components. Lower-touch inhibition is also deferred until it can be proven
+safe without broad privileged control.
 
-Run local checks with `./scripts/validate-ux8406.sh`.
+PSR and Intel `xe` remain diagnostics, not defaults. On the physical machine,
+collect evidence before changing kernel policy:
+
+```bash
+lspci -nnk | grep -A4 -Ei 'VGA|Display'
+lsmod | grep -E '^(i915|xe)\b'
+journalctl -b -k | grep -Ei 'i915|xe|drm|psr|panel'
+```
+
+Before relying on this image, test both OLEDs, connector discovery and scale,
+external-monitor protection, USB and Bluetooth keyboard workflows, touch/pen,
+rotation axes, brightness after suspend/resume, charge threshold availability,
+speakers, internal and headset microphones, IPU6 camera, Intel `ivpu`, and
+suspend/resume. The analog headset microphone and any PSR-related behavior
+still require a real UX8406MA running the built image.
+
+Run the source checks with `./scripts/validate-ux8406.sh`; the GitHub Actions
+matrix independently builds both hardware images and is the authoritative
+BlueBuild recipe validation when the CLI is not installed locally.

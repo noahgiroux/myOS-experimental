@@ -1,0 +1,8 @@
+[Unit]
+Description=Re-synchronize ASUS Zenbook Duo UX8406 after resume
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/current-zenbook-duo resume
