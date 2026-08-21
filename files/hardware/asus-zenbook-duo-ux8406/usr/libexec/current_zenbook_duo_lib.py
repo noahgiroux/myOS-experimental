@@ -1,36 +1,31 @@
 #!/usr/bin/env python3
-"""Small, dependency-free primitives shared by the UX8406 helpers.
-
-The module deliberately keeps model data in /usr/lib/current/zenbook-duo/profiles;
-new UX8406 variants can therefore be added without changing the policy code.
-"""
+"""Dependency-free UX8406 policy and command construction helpers."""
 from __future__ import annotations
 
 import configparser
-import glob
-import json
 import os
 import re
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Iterable
 
 PROFILE_DIR = Path(os.environ.get("ZENBOOK_DUO_PROFILE_DIR", "/usr/lib/current/zenbook-duo/profiles"))
 CONFIG_PATH = Path(os.environ.get("ZENBOOK_DUO_CONFIG", "/etc/current/zenbook-duo.conf"))
+DRM_ROOT = Path(os.environ.get("ZENBOOK_DUO_DRM_ROOT", "/sys/class/drm"))
+DMI_ROOT = Path(os.environ.get("ZENBOOK_DUO_DMI_ROOT", "/sys/class/dmi/id"))
 
 
 @dataclass(frozen=True)
 class Profile:
     name: str
     vendor: str
-    product: str
+    board: str
     keyboard: str
     upper_input: str
     lower_input: str
     top_connector: str
     bottom_connector: str
-    mode_prefix: str
+    default_scale: float
     panel_vendor: str
     panel_product: str
     panel_serial: str
@@ -42,90 +37,73 @@ def _profile(path: Path) -> Profile:
     parser = configparser.ConfigParser()
     parser.read(path)
     section = parser["Model"]
-    split = lambda key: tuple(x.strip() for x in section.get(key, "").split(",") if x.strip())
-    return Profile(path.stem, section["Vendor"], section["Product"], section["Keyboard"],
-                   section["UpperInput"], section["LowerInput"], section["TopConnector"],
-                   section["BottomConnector"], section["ModePrefix"], section["PanelVendor"],
-                   section["PanelProduct"], section["PanelSerial"], split("UpperBacklightPatterns"),
-                   split("LowerBacklightPatterns"))
+    split = lambda key: tuple(value.strip() for value in section.get(key, "").split(",") if value.strip())
+    return Profile(
+        name=path.stem,
+        vendor=section["Vendor"],
+        board=section["Board"],
+        keyboard=section["Keyboard"],
+        upper_input=section["UpperInput"],
+        lower_input=section["LowerInput"],
+        top_connector=section["TopConnector"],
+        bottom_connector=section["BottomConnector"],
+        default_scale=float(section.get("DefaultScale", "1.66667")),
+        panel_vendor=section["PanelVendor"],
+        panel_product=section["PanelProduct"],
+        panel_serial=section["PanelSerial"],
+        upper_backlight_patterns=split("UpperBacklightPatterns"),
+        lower_backlight_patterns=split("LowerBacklightPatterns"),
+    )
 
 
-def dmi_value(name: str, root: Path = Path("/sys/class/dmi/id")) -> str:
+def dmi_value(name: str, root: Path = DMI_ROOT) -> str:
     try:
         return (root / name).read_text(encoding="utf-8", errors="replace").strip()
     except OSError:
         return ""
 
 
-def family_product(product: str) -> bool:
-    return product.upper().startswith("UX8406")
+def model_key(vendor: str, board_name: str, product_name: str) -> str | None:
+    """Return the recognized UX8406 board token, preferring DMI board_name."""
+    if vendor != "ASUSTeK COMPUTER INC.":
+        return None
+    for value in (board_name.upper(), product_name.upper()):
+        match = re.search(r"UX8406(?:MA|CA)", value)
+        if match:
+            return match.group(0)
+    return None
 
 
-def load_profile(vendor: str | None = None, product: str | None = None,
-                 profile_dir: Path = PROFILE_DIR) -> Profile | None:
-    vendor = dmi_value("sys_vendor") if vendor is None else vendor
-    product = dmi_value("product_name") if product is None else product
+def load_profile(vendor: str | None = None, board_name: str | None = None,
+                 product_name: str | None = None, profile_dir: Path = PROFILE_DIR,
+                 dmi_root: Path = DMI_ROOT) -> Profile | None:
+    vendor = dmi_value("sys_vendor", dmi_root) if vendor is None else vendor
+    board_name = dmi_value("board_name", dmi_root) if board_name is None else board_name
+    product_name = dmi_value("product_name", dmi_root) if product_name is None else product_name
+    key = model_key(vendor, board_name, product_name)
+    if key is None:
+        return None
     for path in sorted(profile_dir.glob("*.conf")):
         try:
             profile = _profile(path)
-        except (KeyError, configparser.Error, OSError):
+        except (KeyError, ValueError, configparser.Error, OSError):
             continue
-        if profile.vendor == vendor and profile.product == product:
+        if profile.vendor == vendor and profile.board == key:
             return profile
     return None
 
 
-def hardware_status(profile_dir: Path = PROFILE_DIR) -> tuple[bool, str]:
-    vendor, product = dmi_value("sys_vendor"), dmi_value("product_name")
-    if not family_product(product):
-        return False, f"unsupported hardware: {vendor or '?'} / {product or '?'}"
-    profile = load_profile(vendor, product, profile_dir)
+def hardware_status(profile_dir: Path = PROFILE_DIR, dmi_root: Path = DMI_ROOT) -> tuple[bool, str]:
+    vendor = dmi_value("sys_vendor", dmi_root)
+    board = dmi_value("board_name", dmi_root)
+    product = dmi_value("product_name", dmi_root)
+    key = model_key(vendor, board, product)
+    if key is None:
+        return False, f"unsupported hardware: {vendor or '?'} / {board or product or '?'}"
+    profile = load_profile(vendor, board, product, profile_dir, dmi_root)
     if profile is None:
-        return False, f"UX8406 family detected ({product}), but no model profile is installed"
-    return True, f"supported {profile.name}: {vendor} / {product}"
-
-
-def _unwrap_variant(value: Any) -> Any:
-    # busctl JSON normally returns a {type,data} object. Be liberal for fixtures.
-    if isinstance(value, dict) and "data" in value:
-        return value["data"]
-    return value
-
-
-def parse_mutter_state(value: Any) -> dict[str, Any]:
-    value = _unwrap_variant(value)
-    if isinstance(value, str):
-        value = json.loads(value)
-        value = _unwrap_variant(value)
-    if not isinstance(value, list) or len(value) < 3:
-        raise ValueError("unexpected Mutter DisplayConfig state")
-    monitors, logical = [], []
-    for monitor in value[1] or []:
-        spec = monitor[0]
-        modes = []
-        for mode in monitor[1] or []:
-            modes.append({"id": mode[0], "width": mode[1], "height": mode[2],
-                          "refresh": mode[3], "preferred_scale": mode[4],
-                          "preferred": bool(_unwrap_variant(mode[6]).get("is-current", False))
-                          if isinstance(_unwrap_variant(mode[6]), dict) else False})
-        monitors.append({"connector": spec[0], "vendor": spec[1], "product": spec[2],
-                         "serial": spec[3], "modes": modes,
-                         "internal": spec[0].startswith(("eDP", "LVDS", "DSI"))})
-    for item in value[2] or []:
-        outputs = []
-        for spec in item[5] or []:
-            outputs.append(tuple(spec[:4]))
-        logical.append({"x": item[0], "y": item[1], "scale": item[2],
-                        "transform": item[3], "primary": bool(item[4]), "outputs": outputs})
-    return {"monitors": monitors, "logical_monitors": logical, "properties": value[3] if len(value) > 3 else {}}
-
-
-def mutter_state() -> dict[str, Any]:
-    result = subprocess.run([
-        "busctl", "--user", "--json=short", "call", "org.gnome.Mutter.DisplayConfig",
-        "/org/gnome/Mutter/DisplayConfig", "org.gnome.Mutter.DisplayConfig", "GetCurrentState"
-    ], check=True, capture_output=True, text=True)
-    return parse_mutter_state(result.stdout)
+        return False, f"UX8406 family detected ({key}), but no {key} profile is installed"
+    return True, f"supported {profile.name}: {vendor} / {board or product}"
 
 
 def read_config(path: Path = CONFIG_PATH) -> configparser.ConfigParser:
@@ -136,63 +114,114 @@ def read_config(path: Path = CONFIG_PATH) -> configparser.ConfigParser:
 
 def effective_connectors(profile: Profile, config: configparser.ConfigParser) -> tuple[str, str]:
     section = config["Display"] if config.has_section("Display") else {}
-    return section.get("TopConnector", "").strip() or profile.top_connector, section.get("BottomConnector", "").strip() or profile.bottom_connector
+    return (section.get("TopConnector", "").strip() or profile.top_connector,
+            section.get("BottomConnector", "").strip() or profile.bottom_connector)
 
 
-def has_external_monitor(state: dict[str, Any], internal: Iterable[str]) -> bool:
-    internal = set(internal)
-    return any(m["connector"] not in internal for m in state.get("monitors", []))
+def effective_scale(profile: Profile, config: configparser.ConfigParser) -> float:
+    value = config.get("Display", "Scale", fallback="auto").strip()
+    if value.lower() == "auto":
+        return profile.default_scale
+    try:
+        scale = float(value)
+    except ValueError:
+        return profile.default_scale
+    return scale if scale > 0 else profile.default_scale
 
 
-def preferred_mode(monitor: dict[str, Any], prefix: str, override: str = "") -> str | None:
-    modes = monitor.get("modes", [])
-    if override:
-        for mode in modes:
-            if mode["id"] == override:
-                return override
-    for mode in modes:
-        identity = f'{mode["width"]}x{mode["height"]}@{mode["refresh"]:g}'
-        if identity.startswith(prefix) or mode["id"].startswith(prefix):
-            return mode["id"]
-    for mode in modes:
-        if mode.get("preferred"):
-            return mode["id"]
-    return modes[0]["id"] if modes else None
+def connected_connectors(root: Path = DRM_ROOT) -> set[str]:
+    connected: set[str] = set()
+    for status in root.glob("*/status"):
+        try:
+            if status.read_text().strip() != "connected":
+                continue
+        except OSError:
+            continue
+        name = status.parent.name
+        match = re.match(r"^card\d+-(.+)$", name)
+        if match:
+            connected.add(match.group(1))
+    return connected
 
 
-def layout_plan(state: dict[str, Any], profile: Profile, orientation: str = "normal",
-                attached: bool = False, config: configparser.ConfigParser | None = None) -> list[dict[str, Any]]:
-    config = config or configparser.ConfigParser()
-    top, bottom = effective_connectors(profile, config)
-    monitors = {m["connector"]: m for m in state.get("monitors", [])}
-    if top not in monitors or bottom not in monitors:
-        return []
-    section = config["Display"] if config.has_section("Display") else {}
-    mode_override = section.get("Mode", "").strip()
-    scale_value = section.get("Scale", "auto").strip()
-    def panel(connector: str, transform: str, x: int, y: int) -> dict[str, Any]:
-        mon = monitors[connector]
-        mode = preferred_mode(mon, profile.mode_prefix, mode_override)
-        scale = next((l["scale"] for l in state.get("logical_monitors", []) if connector in [o[0] for o in l["outputs"]]), 1)
-        if scale_value != "auto":
-            try: scale = float(scale_value)
-            except ValueError: pass
-        return {"connector": connector, "mode": mode, "x": x, "y": y, "scale": scale, "transform": transform}
-    transform = {"normal": "normal", "bottom-up": "180", "left-up": "90", "right-up": "270"}.get(orientation, "normal")
-    if attached:
-        return [panel(top, transform, 0, 0)]
-    top_mode = preferred_mode(monitors[top], profile.mode_prefix, mode_override)
-    top_size = next(((m["width"], m["height"]) for m in monitors[top]["modes"] if m["id"] == top_mode), None)
-    if top_size is None:
-        return []
-    rotated_span = top_size[1]
+def has_external_monitor(connected: Iterable[str], internal: Iterable[str]) -> bool:
+    return bool(set(connected) - set(internal))
+
+
+def panels_available(connected: Iterable[str], top: str, bottom: str, root_exists: bool = True) -> bool:
+    # A missing DRM tree is treated as unavailable. This prevents a login race
+    # from writing an arbitrary configuration before DRM devices exist.
+    return root_exists and {top, bottom}.issubset(set(connected))
+
+
+def transform_for(orientation: str) -> str:
+    return {"normal": "normal", "bottom-up": "180", "left-up": "90", "right-up": "270"}.get(orientation, "normal")
+
+
+def layout_monitors(kind: str, orientation: str, top: str, bottom: str) -> list[dict[str, str | bool]]:
+    """Describe relative gdctl logical monitors without fixed pixel offsets."""
+    transform = transform_for(orientation)
+    if kind == "top":
+        return [{"connector": top, "primary": True, "transform": transform}]
+    if kind == "bottom":
+        return [{"connector": bottom, "primary": True, "transform": transform}]
+    if kind != "both":
+        raise ValueError(f"unknown layout kind: {kind}")
     if orientation == "bottom-up":
-        return [panel(bottom, "180", 0, 0), panel(top, "180", 0, -rotated_span)]
+        return [
+            {"connector": bottom, "primary": True, "transform": "180"},
+            {"connector": top, "transform": "180", "above": bottom},
+        ]
     if orientation == "left-up":
-        return [panel(bottom, "90", 0, 0), panel(top, "90", rotated_span, 0)]
+        return [
+            {"connector": bottom, "primary": True, "transform": "90"},
+            {"connector": top, "transform": "90", "right_of": bottom},
+        ]
     if orientation == "right-up":
-        return [panel(top, "270", 0, 0), panel(bottom, "270", rotated_span, 0)]
-    return [panel(top, "normal", 0, 0), panel(bottom, "normal", 0, top_size[1])]
+        return [
+            {"connector": top, "primary": True, "transform": "270"},
+            {"connector": bottom, "transform": "270", "right_of": top},
+        ]
+    return [
+        {"connector": top, "primary": True, "transform": "normal"},
+        {"connector": bottom, "transform": "normal", "below": top},
+    ]
+
+
+def build_gdctl_command(profile: Profile, kind: str, orientation: str,
+                        config: configparser.ConfigParser, scale_override: float | None = None) -> list[str]:
+    top, bottom = effective_connectors(profile, config)
+    mode = config.get("Display", "Mode", fallback="").strip()
+    command = ["gdctl", "set", "--layout-mode", "logical"]
+    for logical in layout_monitors(kind, orientation, top, bottom):
+        command.extend(["--logical-monitor", "--monitor", str(logical["connector"])])
+        if mode:
+            command.extend(["--mode", mode])
+        if logical.get("primary"):
+            command.append("--primary")
+        scale = effective_scale(profile, config) if scale_override is None else scale_override
+        command.extend(["--scale", f"{scale:g}", "--transform", str(logical["transform"])])
+        for option, flag in (("below", "--below"), ("above", "--above"),
+                             ("left_of", "--left-of"), ("right_of", "--right-of")):
+            if option in logical:
+                command.extend([flag, str(logical[option])])
+    return command
+
+
+def active_internal_connectors(gdctl_show: str, known: Iterable[str]) -> set[str]:
+    """Read connector mentions from gdctl's logical-monitor sections only."""
+    active: set[str] = set()
+    logical_sections = re.split(r"(?im)^.*logical monitor\s*#[^\n]*\n", gdctl_show)[1:]
+    for section in logical_sections:
+        for connector in known:
+            if re.search(rf"(?<![A-Za-z0-9_-]){re.escape(connector)}(?![A-Za-z0-9_-])", section):
+                active.add(connector)
+    return active
+
+
+def toggle_target(active: Iterable[str], top: str, bottom: str) -> str:
+    active = set(active)
+    return "top" if {top, bottom}.issubset(active) else "both"
 
 
 def brightness_value(upper: int, upper_max: int, lower_max: int) -> int:
@@ -220,12 +249,13 @@ def keyboard_attached(profile: Profile, root: Path = Path("/sys/bus/usb/devices"
     vendor, product = profile.keyboard.lower().split(":", 1)
     for path in root.glob("*"):
         try:
-            if (path / "idVendor").read_text().strip().lower() == vendor and (path / "idProduct").read_text().strip().lower() == product:
+            if ((path / "idVendor").read_text().strip().lower() == vendor and
+                    (path / "idProduct").read_text().strip().lower() == product):
                 return True
         except OSError:
             continue
     return False
 
 
-def run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, check=True, text=True, capture_output=True)
+def dock_state_changed(previous_attached: bool, current_attached: bool) -> bool:
+    return previous_attached != current_attached

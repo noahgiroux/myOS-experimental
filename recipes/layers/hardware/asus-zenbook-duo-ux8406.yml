@@ -4,7 +4,6 @@ modules:
     install:
       install-weak-deps: false
       packages:
-        - gnome-monitor-config
         - iio-sensor-proxy
         - inotify-tools
         - libwacom-utils
@@ -22,3 +21,4 @@ modules:
     user:
       enabled:
         - current-zenbook-duo-session.service
+        - current-zenbook-duo-resume.path

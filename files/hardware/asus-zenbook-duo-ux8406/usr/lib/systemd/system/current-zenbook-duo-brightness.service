@@ -1,7 +1,6 @@
 [Unit]
 Description=Synchronize ASUS Zenbook Duo UX8406 OLED brightness
-After=systemd-udev-settle.service
-ConditionPathExists=/sys/class/backlight
+After=systemd-udev-trigger.service
 
 [Service]
 Type=simple
